@@ -1,0 +1,10 @@
+PyInstaller
+PySide6==6.11.0
+# python-decouple
+
+# MIDI
+mido
+python-rtmidi
+
+# OSC
+python-osc

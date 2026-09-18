@@ -1,0 +1,16 @@
+[Unit]
+Description=Simple Python Console GUI
+StartLimitBurst=5
+StartLimitIntervalSec=10
+
+[Service]
+WorkingDirectory=/home/pi/mixer_dashboard_screen/
+ExecStart=/home/pi/mixer_dashboard_screen/venv/bin/python3 /home/pi/mixer_dashboard_screen/mixer_dashboard.py --fullscreen
+ExecReload=/bin/kill -HUP
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+RestartSec=5
+
+[Install]
+WantedBy=default.target
