@@ -6,7 +6,9 @@ modal dialog, for kiosk/touch operation). Wraps Ui_PreferencesDialogForm and
 handles:
   - General tab: timecode source (MIDI/OSC), MIDI port, OSC host/port/address/
     fps fallback, device simulation toggle + poll interval.
-  - IEM tab: 4 IEM G4 slots (enabled, name, ip, port, channel).
+  - IEM tab: a section-level "Show AF level" switch, plus 4 IEM G4 slots
+    (enabled, name, ip, port -- no channel field, an SR IEM G4 has no
+    channel-select concept).
   - Wireless Mics tab: 4 EW-DX EM2 channel slots (enabled, name, ip, port,
     channel) -- 2 enabled by default today, 2 more ready for "future" units.
 
@@ -102,6 +104,8 @@ class PreferencesPanel(QWidget):
             int(s.get("POLL_INTERVAL_MS", default=1000, cast=int, section="network")))
 
         # -- IEM tab --
+        self.ui.cb_iem_af_enabled.setChecked(
+            _to_bool(s.get("IEM_AF_ENABLED", default="true", section="iem")))
         for i in range(1, 5):
             getattr(self.ui, f"iem_enabled_{i}").setChecked(
                 _to_bool(s.get(f"IEM{i}_ENABLED", default="false", section="iem")))
@@ -111,8 +115,6 @@ class PreferencesPanel(QWidget):
                 str(s.get(f"IEM{i}_IP", default="", section="iem")))
             getattr(self.ui, f"iem_port_{i}").setValue(
                 int(s.get(f"IEM{i}_PORT", default=53212, cast=int, section="iem")))  # G4 Media Control Protocol
-            getattr(self.ui, f"iem_channel_{i}").setValue(
-                int(s.get(f"IEM{i}_CHANNEL", default=1, cast=int, section="iem")))
 
         # -- Wireless Mics tab --
         for i in range(1, 5):
@@ -145,13 +147,13 @@ class PreferencesPanel(QWidget):
         s.set("DEVICES_ENABLED", self.ui.cb_devices_enabled.isChecked(), section="network")
         s.set("SIMULATE_DEVICES", self.ui.cb_simulate_devices.isChecked(), section="network")
         s.set("POLL_INTERVAL_MS", self.ui.spin_poll_interval.value(), section="network")
+        s.set("IEM_AF_ENABLED", self.ui.cb_iem_af_enabled.isChecked(), section="iem")
 
         for i in range(1, 5):
             s.set(f"IEM{i}_ENABLED", getattr(self.ui, f"iem_enabled_{i}").isChecked(), section="iem")
             s.set(f"IEM{i}_NAME", getattr(self.ui, f"iem_name_{i}").text(), section="iem")
             s.set(f"IEM{i}_IP", getattr(self.ui, f"iem_ip_{i}").text(), section="iem")
             s.set(f"IEM{i}_PORT", getattr(self.ui, f"iem_port_{i}").value(), section="iem")
-            s.set(f"IEM{i}_CHANNEL", getattr(self.ui, f"iem_channel_{i}").value(), section="iem")
 
         for i in range(1, 5):
             s.set(f"MIC{i}_ENABLED", getattr(self.ui, f"mic_enabled_{i}").isChecked(), section="wireless_mics")

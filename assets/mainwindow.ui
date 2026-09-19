@@ -235,11 +235,12 @@
     </widget>
    </widget>
    <widget class="QGroupBox" name="groupDevices">
-    <!-- Height below (502) matches device_widgets.group_devices_height(2): a
-         4-col x 2-row grid of 234px-tall strips. MainWindow recomputes and
+    <!-- Height below (502) matches device_widgets.group_devices_height_for_rows([234,234]):
+         a 4-col x 2-row grid of 234px-tall strips. MainWindow recomputes and
          overrides this at runtime as channels are enabled/disabled in
          Preferences (264px for one row, 66px collapsed when nothing is
-         enabled), so this is just a sane Designer-time / first-paint default. -->
+         enabled, or shorter still if IEM's AF display is switched off), so
+         this is just a sane Designer-time / first-paint default. -->
     <property name="geometry">
      <rect>
       <x>0</x>

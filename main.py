@@ -35,11 +35,11 @@ from pythonosc import osc_server
 
 from assets.mainwindow import Ui_MainWindow
 from preferences import PreferencesPanel
-from device_widgets import DeviceRow, group_devices_height
+from device_widgets import DeviceRow
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-APP_VERSION = "0.9"
+APP_VERSION = "0.13"
 has_fullscreen_option = False
 
 # Vertical geometry for the dynamic groupDevices / webView split. groupDevices
@@ -92,26 +92,24 @@ class SettingsManager:
             },
             # 4 IEM G4 slots (all enabled by default; disable unused ones in Preferences)
             "iem": {
-                "IEM1_ENABLED": "true", "IEM1_NAME": "IEM 1", "IEM1_IP": "", "IEM1_PORT": "53212",
-                "IEM1_CHANNEL": "1",
-                "IEM2_ENABLED": "true", "IEM2_NAME": "IEM 2", "IEM2_IP": "", "IEM2_PORT": "53212",
-                "IEM2_CHANNEL": "1",
-                "IEM3_ENABLED": "true", "IEM3_NAME": "IEM 3", "IEM3_IP": "", "IEM3_PORT": "53212",
-                "IEM3_CHANNEL": "1",
-                "IEM4_ENABLED": "true", "IEM4_NAME": "IEM 4", "IEM4_IP": "", "IEM4_PORT": "53212",
-                "IEM4_CHANNEL": "1",
+                # Section-level (applies to every IEM slot), not per-slot:
+                # Preferences -> IEM -> "Show AF level".
+                "IEM_AF_ENABLED": "true",
+                # No per-slot CHANNEL here -- an SR IEM G4 has no
+                # channel-select concept (one physical unit is one channel),
+                # unlike the mic side's EM2 (see [wireless_mics] below).
+                "IEM1_ENABLED": "true",  "IEM1_NAME": "IEM 1", "IEM1_IP": "", "IEM1_PORT": "53212",
+                "IEM2_ENABLED": "true",  "IEM2_NAME": "IEM 2", "IEM2_IP": "", "IEM2_PORT": "53212",
+                "IEM3_ENABLED": "true",  "IEM3_NAME": "IEM 3", "IEM3_IP": "", "IEM3_PORT": "53212",
+                "IEM4_ENABLED": "true",  "IEM4_NAME": "IEM 4", "IEM4_IP": "", "IEM4_PORT": "53212",
             },
             # 4 wireless-mic slots = up to 2x EW-DX EM2 (2 channels per unit).
             # Slots 1-2 (unit #1) enabled today; 3-4 (unit #2) ready for "the future".
             "wireless_mics": {
-                "MIC1_ENABLED": "true", "MIC1_NAME": "Mic 1", "MIC1_IP": "", "MIC1_PORT": "45",
-                "MIC1_CHANNEL": "1",
-                "MIC2_ENABLED": "true", "MIC2_NAME": "Mic 2", "MIC2_IP": "", "MIC2_PORT": "45",
-                "MIC2_CHANNEL": "2",
-                "MIC3_ENABLED": "false", "MIC3_NAME": "Mic 3", "MIC3_IP": "", "MIC3_PORT": "45",
-                "MIC3_CHANNEL": "1",
-                "MIC4_ENABLED": "false", "MIC4_NAME": "Mic 4", "MIC4_IP": "", "MIC4_PORT": "45",
-                "MIC4_CHANNEL": "2",
+                "MIC1_ENABLED": "true",  "MIC1_NAME": "Mic 1", "MIC1_IP": "", "MIC1_PORT": "45", "MIC1_CHANNEL": "1",
+                "MIC2_ENABLED": "true",  "MIC2_NAME": "Mic 2", "MIC2_IP": "", "MIC2_PORT": "45", "MIC2_CHANNEL": "2",
+                "MIC3_ENABLED": "false", "MIC3_NAME": "Mic 3", "MIC3_IP": "", "MIC3_PORT": "45", "MIC3_CHANNEL": "1",
+                "MIC4_ENABLED": "false", "MIC4_NAME": "Mic 4", "MIC4_IP": "", "MIC4_PORT": "45", "MIC4_CHANNEL": "2",
             },
         }
         self._ensure_loaded()
@@ -576,14 +574,12 @@ class MainWindow(QMainWindow):
 
         # IEM / wireless-mic device row (populates self._ui.deviceRowLayout).
         # Fills IEM 1-4 first, then Mic 1-4, into a 4-col x up-to-2-row grid.
-        self.device_row = DeviceRow(self.settings,
-                                    self._ui.deviceRowLayout,
-                                    self._ui.deviceRowContents)
+        self.device_row = DeviceRow(self.settings, self._ui.deviceRowLayout, self._ui.deviceRowContents)
         self.device_row.layout_changed.connect(self._apply_device_row_geometry)
         # Apply sizing for the initial build (rebuild_from_settings() already
         # ran once inside DeviceRow.__init__, before the signal above was
         # connected, so size explicitly for that first pass here).
-        self._apply_device_row_geometry(self.device_row.rows_used)
+        self._apply_device_row_geometry(self.device_row.group_height)
 
         # WebView
         self._ui.webView.setUrl(QUrl(self.settings.get(                             # type: ignore
@@ -595,7 +591,7 @@ class MainWindow(QMainWindow):
         # Embedded preferences panel for kiosk/touch operation
         self.preferences_panel = PreferencesPanel(self.settings, self._ui.centralwidget)
         self.preferences_panel.resize(300, 902)
-        self.preferences_panel.move(10, 100)
+        self.preferences_panel.move(10, 200)
         self.preferences_panel.hide()
         self.preferences_panel.settingsApplied.connect(self.on_settings_applied)
 
@@ -664,14 +660,15 @@ class MainWindow(QMainWindow):
         # groupDevices/webView resize happens automatically.)
 
     @Slot(int)
-    def _apply_device_row_geometry(self, rows: int):
+    def _apply_device_row_geometry(self, group_h: int):
         """
-        Grow/shrink groupDevices to fit `rows` (0 = collapsed "nothing
-        enabled" message, 1 or 2 = actual rows of channel strips), and slide
-        the web view down/up to start right below it, shrinking it by
-        exactly the amount groupDevices grew (and vice versa).
+        Grow/shrink groupDevices to `group_h` px (computed by DeviceRow from
+        the actual per-row content heights -- rows aren't assumed uniform,
+        since an IEM row can be shorter than a Mic row when IEM's AF display
+        is switched off), and slide the web view down/up to start right
+        below it, shrinking it by exactly the amount groupDevices grew (and
+        vice versa).
         """
-        group_h = group_devices_height(rows)
         self._ui.groupDevices.setGeometry(0, GROUP_DEVICES_Y, 320, group_h)
 
         scroll_h = group_h - 20  # 20px reserved for the QGroupBox title, per the .ui

@@ -50,6 +50,7 @@ An SR IEM G4 is one channel per unit/IP, so no sharing is needed there.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -58,6 +59,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
+
+# Set SQX_G4_DEBUG=1 (or SQX_NET_DEBUG=1 for both protocols) to print every
+# raw line/message received from real hardware -- the fastest way to see
+# exactly what a device is (or isn't) sending, e.g. to confirm whether a
+# cyclic attribute like AF is arriving at all vs. arriving but not parsing.
+# Error responses and Push/subscribe acknowledgments print regardless of
+# this flag, since those are rare and high-value to see either way.
+G4_DEBUG = os.environ.get("SQX_G4_DEBUG", os.environ.get("SQX_NET_DEBUG", "")).lower() in ("1", "true", "yes")
+SSC_DEBUG = os.environ.get("SQX_SSC_DEBUG", os.environ.get("SQX_NET_DEBUG", "")).lower() in ("1", "true", "yes")
 
 G4_PORT = 53212   # SR IEM G4 / EM 300-500 G4 Media Control Protocol (TI 1254 v1.0)
 SSC_PORT = 45     # EW-DX EM 2, legacy unauthenticated SSC
@@ -123,13 +133,13 @@ class DeviceReading:
     lqi: Optional[int] = None               # link quality indicator, 0-100 (m/rxN/rsqi)
     diversity_active: Optional[str] = None  # "A" | "B" | None (m/rxN/divi)
     af_peak: Optional[int] = None           # mono AF level, 0-100 (mapped from m/rxN/af, dBFS)
-    af_dbfs: Optional[float] = None         # the raw dBFS value af_peak was mapped from, for disp.
+    af_dbfs: Optional[float] = None         # the raw dBFS value af_peak was mapped from, for display
     battery_percent: Optional[int] = None   # mates/txN/battery/gauge
     battery_warning: bool = False           # driven by mates/txN/warnings ("LowBattery")
     rf_warning: bool = False                # driven by rxN/warnings ("LowSignal"/"NoLink")
 
     # -- IEM G4 fields --
-    af_l: Optional[int] = None              # stereo AF, left, 0-100 (from the SR's "AF" cyclic)
+    af_l: Optional[int] = None              # stereo AF, left, 0-100 (from the SR's "AF" cyclic push)
     af_r: Optional[int] = None              # stereo AF, right, 0-100
 
     muted: bool = False
@@ -221,13 +231,14 @@ class SimulatedDeviceClient(DeviceClientBase):
                 muted=False,
             )
         else:  # iem
+            af_enabled = getattr(self, "af_enabled", True)
             reading = DeviceReading(
                 connected=True,
                 simulated=True,
                 name=self.name,
                 frequency_mhz=round(520.000 + (hash(self.ip or self.name) % 4000) / 100.0, 3),
-                af_l=self._random_af(),
-                af_r=self._random_af(),
+                af_l=self._random_af() if af_enabled else None,
+                af_r=self._random_af() if af_enabled else None,
                 muted=False,
             )
         self._emit(reading)
@@ -258,7 +269,11 @@ class G4ChannelData:
     af_peak_pct: Optional[int] = None
     af_peak_hold_pct: Optional[int] = None
 
-    # SR (transmitter) only -- this is what our IEM slots read
+    # SR (transmitter) only -- this is what our IEM slots read. Per TI 1254
+    # v1.0 section "Cyclic attributes valid for SR only", the 4 values are,
+    # in order: Af-Peak1, Af-Peak2, Af-PeakHold1, Af-PeakHold2 (0..100%,
+    # >100% possible) -- i.e. instantaneous L/R followed by their peak-hold.
+    # We only use the first two (instantaneous) for the live meter.
     sr_af_levels: List[int] = field(default_factory=list)
     mode_stereo: Optional[bool] = None
     sensitivity_db: Optional[int] = None
@@ -272,6 +287,22 @@ class G4Device(QObject):
     covering ew 300-500 G4 and ew IEM G4 stationary devices. Subscribes to
     cyclic attribute pushes via `Push` and renews that subscription before
     it expires; a watchdog flags the device offline if pushes stop arriving.
+
+    Real-hardware finding, confirmed: an SR's cyclic attributes (AF among
+    them) weren't updating even though frequency/mute/connection all worked
+    fine. Debug logging showed the device rejecting our subscription
+    outright -- "1020: Value out of range [ Push 60 1000 7 ]" -- which
+    `_send_push()` now explains and fixes: the flags=7 we were sending sets
+    a bit ("on change of pilot signal or battery status") that TI 1254
+    v1.0's own flag table marks "(EM only)"; an SR has neither to report
+    that way, so the device apparently doesn't accept it as a legal value
+    at all. SR now gets flags=3 (the two device-agnostic bits only).
+
+    (Earlier, before that error was actually visible, a case mismatch in
+    the spec's own AF example -- "Af" vs. the header's "AF" -- looked like
+    the likely cause and `_handle_line()` was made case-insensitive to
+    cover it. That's harmless and stays, but the flags value was the actual
+    fix.)
     """
 
     data_changed = Signal()
@@ -296,7 +327,7 @@ class G4Device(QObject):
         self._stale_after_ms = self.PUSH_TIMEOUT_S * 1000 + 8000
 
         self.socket = QUdpSocket(self)
-        self.socket.bind(QHostAddress.AnyIPv4, 0)                                   # type: ignore
+        self.socket.bind(QHostAddress.AnyIPv4, 0)
         self.socket.readyRead.connect(self._on_ready_read)
 
         self._renew_timer = QTimer(self)
@@ -325,9 +356,16 @@ class G4Device(QObject):
             self._send("Sensitivity")
 
     def _send_push(self) -> None:
-        # parameters: timeout(s) cycle(ms) flags(7 = cyclic+config, on every
-        # warning/pilot/battery change, immediately)
-        self._send(f"Push {self.PUSH_TIMEOUT_S} {self.push_cycle_ms} 7")
+        # 3rd parameter is a 3-bit field: +1 config-on-change, +2 cyclic-on-
+        # warning-change, +4 cyclic-on-pilot/battery-change. That +4 bit is
+        # explicitly documented as "(EM only)" in TI 1254 v1.0's flag table.
+        # Real hardware (an SR/IEM G4) rejected "Push 60 1000 7" outright
+        # with error 1020 ("value out of range") -- consistent with +4
+        # simply not being a legal value for a device with no pilot signal
+        # or battery of its own to report that way. SR gets flags=3 (the
+        # two device-agnostic bits only); EM keeps the full flags=7.
+        flags = 3 if self.kind == "G4_SR" else 7
+        self._send(f"Push {self.PUSH_TIMEOUT_S} {self.push_cycle_ms} {flags}")
 
     def set_mute(self, mute: bool) -> None:
         self._send(f"Mute {1 if mute else 0}")
@@ -354,38 +392,53 @@ class G4Device(QObject):
             if not self.online:
                 self.online = True
                 self.connection_changed.emit(True)
-            text = bytes(datagram).decode("ascii", errors="ignore")                 # type: ignore
+            text = bytes(datagram).decode("ascii", errors="ignore")
             for line in text.split("\r"):
                 line = line.strip()
                 if line:
+                    if G4_DEBUG:
+                        print(f"G4 [{self.name or self.ip}] <- {line!r}")
                     self._handle_line(line)
         self.data_changed.emit()
 
     def _handle_line(self, line: str) -> None:
         if _G4_ERROR_RE.match(line):
-            return  # negative response, e.g. "1020: Value out of range [...]"
+            # Previously silently dropped -- these were invisible even when
+            # e.g. our own Push command was being rejected by the device,
+            # which would explain "cyclic attributes never arrive" while
+            # one-shot commands (Name/Frequency/Mute) keep working fine.
+            print(f"G4 [{self.name or self.ip}]: device reported an error: {line}")
+            return
 
         parts = line.split(" ")
-        cmd, args = parts[0], parts[1:]
+        # Case-insensitive on purpose: the protocol doc's own "Response of
+        # cyclic attributes" example writes the SR's audio-level line as
+        # "Af ..." while that same attribute's formal header (and the EM
+        # side's own example) is "AF" -- an inconsistency inside the spec
+        # itself. Real firmware may emit either; comparing case-folded means
+        # it doesn't matter which one actually shows up on the wire. No two
+        # command keywords in this protocol differ only by case, so this
+        # can't introduce an ambiguity.
+        cmd, args = parts[0].upper(), parts[1:]
         d = self.data
         try:
-            if cmd == "Name":
+            if cmd == "NAME":
                 d.name = " ".join(args)
-            elif cmd == "FirmwareRevision":
+            elif cmd == "FIRMWAREREVISION":
                 d.firmware = args[0] if args else ""
-            elif cmd == "Frequency":
+            elif cmd == "FREQUENCY":
                 d.frequency_khz = int(args[0])
                 d.bank = int(args[1]) if len(args) > 1 else None
                 d.channel = int(args[2]) if len(args) > 2 else None
-            elif cmd == "Mute":
+            elif cmd == "MUTE":
                 d.mute = bool(int(args[0]))
-            elif cmd == "Msg":
+            elif cmd == "MSG":
                 d.warnings = " ".join(args) if args else "OK"
-            elif cmd == "Mode":
+            elif cmd == "MODE":
                 d.mode_stereo = bool(int(args[0]))
-            elif cmd == "Sensitivity":
+            elif cmd == "SENSITIVITY":
                 d.sensitivity_db = int(args[0])
-            elif cmd == "Bat":
+            elif cmd == "BAT":
                 d.battery_pct = None if args[0] == "?" else int(args[0])
             elif cmd == "RF1":
                 d.rf_level_pct = max(d.rf_level_pct or 0, int(args[1]))
@@ -399,9 +452,23 @@ class G4Device(QObject):
                 d.af_peak_pct = int(args[0])
                 d.af_peak_hold_pct = int(args[1])
             elif cmd == "AF" and self.kind == "G4_SR":
-                d.sr_af_levels = [int(a) for a in args]
-            elif cmd in ("States", "Config", "Push", "BankList", "RfConfig", "Squelch",
-                         "Equalizer"):
+                try:
+                    d.sr_af_levels = [int(a) for a in args]
+                except ValueError:
+                    # Isolated from the broad except below on purpose: if
+                    # one value in this line fails to parse, we want to know
+                    # about it (and see the raw args) rather than have it
+                    # silently vanish along with everything else this line
+                    # might have updated.
+                    print(f"G4 [{self.name or self.ip}]: AF line didn't parse as "
+                          f"integers: {args!r}")
+            elif cmd == "PUSH":
+                # Acknowledgment of our Push subscription request -- printed
+                # so a rejected/adjusted subscription is visible instead of
+                # silently doing nothing. A healthy ack echoes back
+                # "PUSH <timeout> <cycle> <flags>" matching what we sent.
+                print(f"G4 [{self.name or self.ip}]: Push acknowledged: {line}")
+            elif cmd in ("STATES", "CONFIG", "BANKLIST", "RFCONFIG", "SQUELCH", "EQUALIZER"):
                 pass  # received/acknowledged but not surfaced in the UI
         except (ValueError, IndexError):
             pass  # malformed/unexpected line - ignore rather than crash
@@ -417,16 +484,18 @@ class G4Device(QObject):
 class G4IemChannelClient(DeviceClientBase):
     """
     Adapter: wraps one G4Device(kind="G4_SR") -- one physical SR IEM G4 unit
-    is one audio channel -- and republishes it as a DeviceReading. The
-    `channel` slot value from settings.ini isn't meaningful to this protocol
-    (there's no channel-select command; which channel you're talking to is
-    simply a function of which IP you sent the datagram to), so it's
-    accepted for interface symmetry with the mic client but otherwise unused.
+    is one audio channel, so unlike the mic side there's no `channel` concept
+    to select here; the base class's `channel` field is accepted for
+    interface symmetry but never read.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, af_enabled: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self._device: Optional[G4Device] = None
+        # Preferences -> IEM "Show AF level" switch. False means we don't
+        # even do the (cheap, but non-zero) work of pulling L/R out of the
+        # cyclic AF line -- the widget won't show a meter for it either way.
+        self.af_enabled = af_enabled
 
     def start(self):
         if not self.ip:
@@ -445,14 +514,16 @@ class G4IemChannelClient(DeviceClientBase):
             self._device = None
 
     def _on_data_changed(self):
-        d = self._device.data                                                       # type: ignore
-        af = d.sr_af_levels
-        af_l = af[0] if len(af) >= 1 else None
-        af_r = af[1] if len(af) >= 2 else (af[0] if len(af) == 1 else None)
+        d = self._device.data
+        af_l = af_r = None
+        if self.af_enabled:
+            af = d.sr_af_levels
+            af_l = af[0] if len(af) >= 1 else None
+            af_r = af[1] if len(af) >= 2 else (af[0] if len(af) == 1 else None)
         reading = DeviceReading(
-            connected=self._device.online,                                          # type: ignore
+            connected=self._device.online,
             simulated=False,
-            name=d.name or self.name,
+            name=d.name,   # the device's own reported name -- not our configured one
             frequency_mhz=(d.frequency_khz / 1000.0) if d.frequency_khz is not None else None,
             warnings=d.warnings,
             af_l=af_l,
@@ -508,7 +579,7 @@ class SSCEM2Device(QObject):
         self._last_rx_ms = 0.0
 
         self.socket = QUdpSocket(self)
-        self.socket.bind(QHostAddress.AnyIPv4, 0)                                   # type: ignore
+        self.socket.bind(QHostAddress.AnyIPv4, 0)
         self.socket.readyRead.connect(self._on_ready_read)
 
         self._poll_timer = QTimer(self)
@@ -584,9 +655,11 @@ class SSCEM2Device(QObject):
                 self.online = True
                 self.connection_changed.emit(True)
             try:
-                msg = json.loads(bytes(datagram).decode("utf-8"))                   # type: ignore
+                msg = json.loads(bytes(datagram).decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if SSC_DEBUG:
+                print(f"SSC [{self.name or self.ip}] <- {msg!r}")
             if isinstance(msg, dict):
                 self._apply(msg, ())
         self.data_changed.emit()
@@ -610,7 +683,7 @@ class SSCEM2Device(QObject):
         elif path[0] == "m" and len(path) > 1 and path[1] in ("rx1", "rx2"):
             chan = self.rx1 if path[1] == "rx1" else self.rx2
             leaf_path = path[2:]
-        elif path[0] == "mates" and len(path) > 1 and path[1] in ("tx1", "tx2"):    # type: ignore
+        elif path[0] == "mates" and len(path) > 1 and path[1] in ("tx1", "tx2"):
             chan = self.rx1 if path[1] == "tx1" else self.rx2
             leaf_path = path[2:]
         else:
@@ -670,7 +743,7 @@ class SscMicChannelClient(DeviceClientBase):
             self.connection_changed.emit(False)
             return
         self._device = self._registry.get_em2(self.ip, port=self.port or SSC_PORT,
-                                              poll_ms=self.poll_interval_ms)
+                                               poll_ms=self.poll_interval_ms)
         self._device.data_changed.connect(self._on_data_changed)
         self._device.connection_changed.connect(self.connection_changed)
         self.connection_changed.emit(self._device.online)
@@ -694,7 +767,7 @@ class SscMicChannelClient(DeviceClientBase):
         chan = self._device.rx1 if self.channel == 1 else self._device.rx2
 
         # /m/rxN/divi: 0=none, 1=antenna A, 2=antenna B (SSC dev guide 8.98/8.102).
-        diversity_active = {1: "A", 2: "B"}.get(chan.divi)                          # type: ignore
+        diversity_active = {1: "A", 2: "B"}.get(chan.divi)
 
         # /m/rxN/af is dBFS (-138.5..0); map onto the widget's 0-100% bar.
         af_peak = None
@@ -707,7 +780,7 @@ class SscMicChannelClient(DeviceClientBase):
         reading = DeviceReading(
             connected=self._device.online,
             simulated=False,
-            name=chan.name or self.name,
+            name=chan.name,   # the device's own reported name -- not our configured one
             frequency_mhz=(chan.frequency_khz / 1000.0) if chan.frequency_khz is not None else None,
             warnings=warning_text,
             rf_dbm=chan.rssi_dbm,
@@ -721,7 +794,7 @@ class SscMicChannelClient(DeviceClientBase):
             # with a threshold check as a belt-and-suspenders fallback in case
             # a warning hasn't been polled yet.
             battery_warning=("LowBattery" in chan.tx_warnings
-                             or (chan.battery_pct is not None and chan.battery_pct < 15)),
+                              or (chan.battery_pct is not None and chan.battery_pct < 15)),
             rf_warning=(any(w in ("LowSignal", "NoLink") for w in chan.rx_warnings)
                         or (chan.rssi_dbm is not None and chan.rssi_dbm < -80)
                         or (chan.rsqi_pct is not None and chan.rsqi_pct < 20)),
@@ -762,13 +835,21 @@ class DeviceRegistry:
 # ---------------------------------------------------------------------------
 
 def make_client(kind: str, name: str, ip: str, port: int, channel: int,
-                poll_interval_ms: int, simulate: bool,
-                registry: "DeviceRegistry", parent=None) -> DeviceClientBase:
-    """Factory: returns a simulated or real (protocol-appropriate) client."""
+                 poll_interval_ms: int, simulate: bool,
+                 registry: "DeviceRegistry", af_enabled: bool = True,
+                 parent=None) -> DeviceClientBase:
+    """
+    Factory: returns a simulated or real (protocol-appropriate) client.
+    `af_enabled` only applies to `kind == "iem"` (Preferences -> IEM ->
+    "Show AF level"); ignored for mic.
+    """
     if simulate or not ip:
-        return SimulatedDeviceClient(kind, name, ip, port, channel, poll_interval_ms, parent=parent)
+        client = SimulatedDeviceClient(kind, name, ip, port, channel, poll_interval_ms, parent=parent)
+        if kind == "iem":
+            client.af_enabled = af_enabled
+        return client
     if kind == "iem":
         return G4IemChannelClient(kind, name, ip, port or G4_PORT, channel,
-                                  poll_interval_ms, parent=parent)
+                                   poll_interval_ms, af_enabled=af_enabled, parent=parent)
     return SscMicChannelClient(registry, kind, name, ip, port or SSC_PORT, channel,
-                               poll_interval_ms, parent=parent)
+                                poll_interval_ms, parent=parent)

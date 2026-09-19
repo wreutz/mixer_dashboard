@@ -316,6 +316,24 @@
       <layout class="QVBoxLayout" name="verticalLayoutIem">
 
        <item>
+        <widget class="QGroupBox" name="groupIemAf">
+         <property name="title">
+          <string>Audio level</string>
+         </property>
+         <layout class="QFormLayout" name="formIemAf">
+          <property name="topMargin"><number>20</number></property>
+          <item row="0" column="0">
+           <widget class="QCheckBox" name="cb_iem_af_enabled">
+            <property name="text">
+             <string>Show AF level (all IEM channels)</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <item>
         <widget class="QGroupBox" name="iem_group_1">
          <property name="title">
           <string>IEM G4 #1</string>
@@ -329,8 +347,6 @@
           <item row="2" column="1"><widget class="QLineEdit" name="iem_ip_1"/></item>
           <item row="3" column="0"><widget class="QLabel" name="label_iem_port_1"><property name="text"><string>Port</string></property></widget></item>
           <item row="3" column="1"><widget class="QSpinBox" name="iem_port_1"><property name="minimum"><number>1</number></property><property name="maximum"><number>65535</number></property></widget></item>
-          <item row="4" column="0"><widget class="QLabel" name="label_iem_channel_1"><property name="text"><string>Channel</string></property></widget></item>
-          <item row="4" column="1"><widget class="QSpinBox" name="iem_channel_1"><property name="minimum"><number>1</number></property><property name="maximum"><number>2</number></property></widget></item>
          </layout>
         </widget>
        </item>
@@ -349,8 +365,6 @@
           <item row="2" column="1"><widget class="QLineEdit" name="iem_ip_2"/></item>
           <item row="3" column="0"><widget class="QLabel" name="label_iem_port_2"><property name="text"><string>Port</string></property></widget></item>
           <item row="3" column="1"><widget class="QSpinBox" name="iem_port_2"><property name="minimum"><number>1</number></property><property name="maximum"><number>65535</number></property></widget></item>
-          <item row="4" column="0"><widget class="QLabel" name="label_iem_channel_2"><property name="text"><string>Channel</string></property></widget></item>
-          <item row="4" column="1"><widget class="QSpinBox" name="iem_channel_2"><property name="minimum"><number>1</number></property><property name="maximum"><number>2</number></property></widget></item>
          </layout>
         </widget>
        </item>
@@ -369,8 +383,6 @@
           <item row="2" column="1"><widget class="QLineEdit" name="iem_ip_3"/></item>
           <item row="3" column="0"><widget class="QLabel" name="label_iem_port_3"><property name="text"><string>Port</string></property></widget></item>
           <item row="3" column="1"><widget class="QSpinBox" name="iem_port_3"><property name="minimum"><number>1</number></property><property name="maximum"><number>65535</number></property></widget></item>
-          <item row="4" column="0"><widget class="QLabel" name="label_iem_channel_3"><property name="text"><string>Channel</string></property></widget></item>
-          <item row="4" column="1"><widget class="QSpinBox" name="iem_channel_3"><property name="minimum"><number>1</number></property><property name="maximum"><number>2</number></property></widget></item>
          </layout>
         </widget>
        </item>
@@ -389,8 +401,6 @@
           <item row="2" column="1"><widget class="QLineEdit" name="iem_ip_4"/></item>
           <item row="3" column="0"><widget class="QLabel" name="label_iem_port_4"><property name="text"><string>Port</string></property></widget></item>
           <item row="3" column="1"><widget class="QSpinBox" name="iem_port_4"><property name="minimum"><number>1</number></property><property name="maximum"><number>65535</number></property></widget></item>
-          <item row="4" column="0"><widget class="QLabel" name="label_iem_channel_4"><property name="text"><string>Channel</string></property></widget></item>
-          <item row="4" column="1"><widget class="QSpinBox" name="iem_channel_4"><property name="minimum"><number>1</number></property><property name="maximum"><number>2</number></property></widget></item>
          </layout>
         </widget>
        </item>

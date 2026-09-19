@@ -56,11 +56,64 @@ STRIP_WIDTH = 74
 # item stack rather than guessed.
 STRIP_HEIGHT = 234
 
+# Height for an IEM strip with AF display disabled (name + frequency only,
+# no meters at all) -- computed the same way as STRIP_HEIGHT, by simulating
+# the actual QVBoxLayout item stack rather than guessed.
+IEM_STRIP_HEIGHT_COMPACT = 63
+
 # RF is reported in dBm, but the bar needs a 0-100% fill. This is the display
 # window only -- it does not clamp or alter the dBm value shown in the readout.
 # Widen/narrow it if your EM2s sit in a different part of the range in practice.
 RF_DBM_FLOOR = -95.0     # bar empty at or below this
 RF_DBM_CEILING = -25.0   # bar full at or above this
+
+# G4 reports IEM AF level as 0-100% ("at 0 dB", per TI 1254 v1.0), not dBFS.
+# We convert to an approximate dB scale via 20*log10(pct/100) -- 100% -> 0dB,
+# halving amplitude -> -6dB, etc. -- since Sennheiser doesn't publish the
+# exact curve WSM itself uses internally.
+#
+# IEM_AF_DB_FLOOR (-135) is the absolute clamp for the *readout number* --
+# avoids -infinity at 0%, and legitimately shows near-silence as a very low
+# number. IEM_AF_BAR_DB_FLOOR/CEILING is a SEPARATE, much narrower window
+# for the *bar fill* -- comparing against real WSM side by side, its meter's
+# visible tick marks (-10/-20/-30dB) imply a scale only tens of dB wide, not
+# 135dB wide. Mapping the bar through -135..0 made it read almost empty for
+# perfectly normal signal levels; a receiver at -10dB would only reach ~7%
+# up a -135-tall bar. -40..0 is an estimate from where WSM's ticks stop
+# being visible in that comparison, not a documented value -- adjust it if
+# it's still off, and note that RF_DBM_FLOOR/CEILING above is the same
+# pattern (a narrow *display* window, independent of the raw value/readout).
+IEM_AF_DB_FLOOR = -135.0
+IEM_AF_BAR_DB_FLOOR = -40.0
+IEM_AF_BAR_DB_CEILING = 0.0
+
+
+def _af_pct_to_db(pct):
+    """Raw 0-100% (linear amplitude, per TI 1254) -> dB, floored at
+    IEM_AF_DB_FLOOR. None in, None out."""
+    if pct is None:
+        return None
+    if pct <= 0:
+        return IEM_AF_DB_FLOOR
+    return max(IEM_AF_DB_FLOOR, 20.0 * math.log10(pct / 100.0))
+
+
+def _af_db_to_text(db) -> str:
+    return "--" if db is None else f"{db:.0f}"
+
+
+def _af_db_to_bar_pct(db):
+    """
+    Maps dB onto the bar's 0-100% fill using IEM_AF_BAR_DB_FLOOR/CEILING --
+    a log-scaled bar, matching the log-scaled number underneath it (and
+    matching what a real dB meter, WSM included, actually looks like) --
+    rather than the raw linear percentage, which doesn't correspond to
+    "how loud something looks on a meter" at all.
+    """
+    if db is None:
+        return None
+    span = IEM_AF_BAR_DB_CEILING - IEM_AF_BAR_DB_FLOOR
+    return max(0.0, min(100.0, (db - IEM_AF_BAR_DB_FLOOR) / span * 100.0))
 
 # Geometry knobs shared with MainWindow's dynamic resize calculation (kept
 # here, next to STRIP_HEIGHT, so the two stay in sync).
@@ -69,23 +122,27 @@ GRID_MARGIN_TOP = 2
 GRID_MARGIN_BOTTOM = 2
 GROUPBOX_TITLE_OFFSET = 20   # vertical space a QGroupBox title reserves above its content
 GROUP_BOTTOM_PADDING = 6     # a little breathing room / scrollbar allowance
-EMPTY_MESSAGE_HEIGHT = 40    # collapsed height: just enough for the 2-line "nothing enabled" msg
+EMPTY_MESSAGE_HEIGHT = 40    # collapsed height: just enough for the 2-line "nothing enabled" message
 
 
-def group_devices_height(rows: int) -> int:
+def group_devices_height_for_rows(row_heights) -> int:
     """
-    Height (px) the IEM/Mic QGroupBox needs. `rows` is 1 or 2 for an actual
-    grid of channel strips; MainWindow uses this to grow/shrink groupDevices
-    and push the web view down/up to match. `rows == 0` is the collapsed
-    state -- no channels enabled, or the whole feature switched off via
-    DEVICES_ENABLED -- which needs only enough room for a short message, not
-    a full row of channel strips.
+    Height (px) the IEM/Mic QGroupBox needs to show rows whose *actual*
+    content heights are given in `row_heights` (one entry per occupied grid
+    row, tallest widget in that row). Rows aren't assumed uniform anymore:
+    an IEM row can be shorter than a Mic row when IEM's AF display is
+    disabled (IEM_STRIP_HEIGHT_COMPACT instead of STRIP_HEIGHT), so
+    MainWindow needs the real per-row heights, not just a row count, to
+    grow/shrink groupDevices (and push the web view down/up) correctly.
+
+    An empty list is the collapsed state -- no channels enabled, or the
+    whole feature switched off via DEVICES_ENABLED -- which needs only
+    enough room for a short message, not a full row of channel strips.
     """
-    if rows <= 0:
+    if not row_heights:
         return GROUPBOX_TITLE_OFFSET + EMPTY_MESSAGE_HEIGHT + GROUP_BOTTOM_PADDING
-    rows = min(GRID_MAX_ROWS, rows)
-    content_h = (rows * STRIP_HEIGHT
-                 + max(0, rows - 1) * GRID_ROW_SPACING
+    content_h = (sum(row_heights)
+                 + max(0, len(row_heights) - 1) * GRID_ROW_SPACING
                  + GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM)
     return GROUPBOX_TITLE_OFFSET + content_h + GROUP_BOTTOM_PADDING
 
@@ -129,12 +186,27 @@ def _segment_color(lit_index: int, lit_count: int, total: int, kind: str) -> QCo
 # ---------------------------------------------------------------------------
 
 class SegmentBar(QWidget):
-    """A small vertical segmented level meter (used for RF, LQI, AF)."""
+    """
+    A small vertical segmented level meter (used for RF, LQI, AF).
 
-    def __init__(self, kind: str, segments: int = 6, parent=None):
+    `dense=True` (used for AF meters) computes the segment count from the
+    bar's actual available height at paint time instead of using a fixed
+    count, aiming for ~3px segments with a 1px gap -- a much finer,
+    closer-to-continuous look (WSM's own meters read this way) than the
+    fixed 6-segment bar RF/LQI still use, which was fine for a coarse
+    signal-quality indicator but far too coarse for an audio level meter.
+    """
+
+    DENSE_TARGET_SEGMENT_PX = 3.0
+    DENSE_GAP_PX = 1
+    DENSE_MIN_SEGMENTS = 10
+    DENSE_MAX_SEGMENTS = 60
+
+    def __init__(self, kind: str, segments: int = 6, dense: bool = False, parent=None):
         super().__init__(parent)
         self.kind = kind  # "level" (RF/LQI) or "af"
-        self.segments = segments
+        self.segments = segments   # used only when dense=False
+        self.dense = dense
         self._value = 0  # 0-100, None-safe via set_value
         self._enabled_state = True
         self.setMinimumSize(10, 44)
@@ -150,15 +222,22 @@ class SegmentBar(QWidget):
         self._enabled_state = enabled
         self.update()
 
+    def _segment_count(self, height: float) -> int:
+        if not self.dense:
+            return self.segments
+        raw = int(height // (self.DENSE_TARGET_SEGMENT_PX + self.DENSE_GAP_PX))
+        return max(self.DENSE_MIN_SEGMENTS, min(self.DENSE_MAX_SEGMENTS, raw))
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         w = self.width()
         h = self.height()
-        gap = 2
-        seg_h = (h - gap * (self.segments - 1)) / self.segments
-        lit_count = round((self._value / 100.0) * self.segments)
-        for i in range(self.segments):
+        gap = self.DENSE_GAP_PX if self.dense else 2
+        segments = self._segment_count(h)
+        seg_h = (h - gap * (segments - 1)) / segments
+        lit_count = round((self._value / 100.0) * segments)
+        for i in range(segments):
             # index 0 = bottom segment
             y = h - (i + 1) * seg_h - i * gap
             rect = QRectF(0, y, w, seg_h)
@@ -166,7 +245,7 @@ class SegmentBar(QWidget):
             if not self._enabled_state:
                 color = COLOR_OFF
             elif lit:
-                color = _segment_color(i, lit_count, self.segments, self.kind)
+                color = _segment_color(i, lit_count, segments, self.kind)
             else:
                 color = COLOR_OFF
             painter.fillRect(rect, color)
@@ -214,19 +293,19 @@ def _readout_label() -> QLabel:
 class MeterBlock(QWidget):
     """Caption label + segmented bar + (optional) numeric value readout, stacked vertically."""
 
-    def __init__(self, caption: str, kind: str, show_value: bool = True, parent=None):
+    def __init__(self, caption: str, kind: str, show_value: bool = True, dense: bool = False, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
         layout.addWidget(_caption_label(caption))
-        self.bar = SegmentBar(kind)
+        self.bar = SegmentBar(kind, dense=dense)
         layout.addWidget(self.bar, stretch=1)
         self.value_label = _value_label() if show_value else None
         if self.value_label is not None:
             layout.addWidget(self.value_label)
 
-    def set_value(self, value, text: str = None):                                   # type: ignore
+    def set_value(self, value, text: str = None):
         self.bar.set_value(value)
         if self.value_label is not None:
             self.value_label.setText(text if text is not None else "--")
@@ -379,8 +458,7 @@ class ChannelStripWidget(QFrame):
         self.name_label = QLabel("--")
         self.name_label.setWordWrap(True)
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.name_label.setStyleSheet(f"color: {COLOR_TEXT.name()}; font-size: 10px; "
-                                      "font-weight: bold;")
+        self.name_label.setStyleSheet(f"color: {COLOR_TEXT.name()}; font-size: 10px; font-weight: bold;")
         self.name_label.setFixedHeight(20)
         self._outer.addWidget(self.name_label)
 
@@ -405,7 +483,7 @@ class ChannelStripWidget(QFrame):
         self.setVisible(enabled)
         self._apply_frame_style()
 
-    def set_connected(self, connected: bool, simulated: bool = None):               # type: ignore
+    def set_connected(self, connected: bool, simulated: bool = None):
         """
         Status dot: green = connected, red = disconnected, orange = this
         channel is simulated (regardless of `connected`, since a simulated
@@ -458,7 +536,7 @@ class WirelessMicChannelWidget(ChannelStripWidget):
         meter_row.addWidget(self.rf_meter)
         self.lqi_meter = MeterBlock("LQI", "level", show_value=False)
         meter_row.addWidget(self.lqi_meter)
-        self.af_meter = MeterBlock("AF", "af", show_value=True)
+        self.af_meter = MeterBlock("AF", "af", show_value=False, dense=True)
         meter_row.addWidget(self.af_meter)
         outer.addLayout(meter_row, stretch=1)
 
@@ -483,8 +561,7 @@ class WirelessMicChannelWidget(ChannelStripWidget):
         self.set_connected(reading.connected, reading.simulated)
         self.name_label.setText(reading.name or "--")
 
-        self.diversity.set_active(reading.diversity_active,                     # type: ignore
-                                  enabled=self._enabled_state)
+        self.diversity.set_active(reading.diversity_active, enabled=self._enabled_state)
 
         # RF is reported in dBm; map onto the bar's 0-100% fill for the visual
         # meter only (RF_DBM_FLOOR..RF_DBM_CEILING -> empty..full).
@@ -500,8 +577,7 @@ class WirelessMicChannelWidget(ChannelStripWidget):
         self.lqi_readout.setText(
             f"LQI {reading.lqi}%" if reading.lqi is not None else "LQI --")
 
-        af_text = f"{reading.af_dbfs:.0f}" if reading.af_dbfs is not None else "--"
-        self.af_meter.set_value(reading.af_peak, af_text)
+        self.af_meter.set_value(reading.af_peak)
 
         self.battery.set_value(reading.battery_percent, reading.battery_warning)
 
@@ -515,26 +591,46 @@ class WirelessMicChannelWidget(ChannelStripWidget):
             self.freq_readout.setText("-- MHz")
 
         self._set_warning_style(reading.rf_warning or reading.battery_warning
-                                or _has_warning_text(reading.warnings))
+                                 or _has_warning_text(reading.warnings))
 
 
 class IemChannelWidget(ChannelStripWidget):
     """
     IEM G4 channel: transmitter-side, so no RF meter or battery -- just
-    frequency and stereo AF level (L / R).
+    frequency and stereo AF level (L / R). `af_enabled=False` (the
+    Preferences -> IEM "Show AF level" switch) drops the AF section
+    entirely and shrinks the strip to IEM_STRIP_HEIGHT_COMPACT, showing
+    only the name and frequency.
     """
 
-    def __init__(self, channel_label: str, parent=None):
+    def __init__(self, channel_label: str, af_enabled: bool = True, parent=None):
+        # Set before super().__init__() -- _build_content() (called from
+        # within it) needs to know which layout to build.
+        self._af_enabled = af_enabled
         super().__init__(header=channel_label, parent=parent)
 
     def _build_content(self, outer: QVBoxLayout):
-        # Stereo AF only -- captioned L / R bars side by side. No RF meter and
-        # no battery gauge: an IEM G4 transmitter has neither to report.
+        if not self._af_enabled:
+            self.af_l_meter = None
+            self.af_r_meter = None
+            self.freq_readout = _readout_label()
+            outer.addWidget(self.freq_readout)
+            outer.addStretch(1)
+            self._meter_blocks = []
+            # Overrides the STRIP_HEIGHT the base class already applied.
+            self.setFixedSize(STRIP_WIDTH, IEM_STRIP_HEIGHT_COMPACT)
+            return
+
+        # Stereo AF only -- captioned L / R bars side by side, each with its
+        # own dB readout underneath (narrow enough that "-135" still fits
+        # without widening the column -- see _af_db_to_text). No RF
+        # meter and no battery gauge: an IEM G4 transmitter has neither to
+        # report.
         af_row = QHBoxLayout()
         af_row.setSpacing(6)
-        self.af_l_meter = MeterBlock("L", "af", show_value=False)
+        self.af_l_meter = MeterBlock("L", "af", show_value=True, dense=True)
         af_row.addWidget(self.af_l_meter)
-        self.af_r_meter = MeterBlock("R", "af", show_value=False)
+        self.af_r_meter = MeterBlock("R", "af", show_value=True, dense=True)
         af_row.addWidget(self.af_r_meter)
         outer.addLayout(af_row, stretch=1)
 
@@ -547,8 +643,11 @@ class IemChannelWidget(ChannelStripWidget):
         self.set_connected(reading.connected, reading.simulated)
         self.name_label.setText(reading.name or "--")
 
-        self.af_l_meter.set_value(reading.af_l)
-        self.af_r_meter.set_value(reading.af_r)
+        if self._af_enabled:
+            db_l = _af_pct_to_db(reading.af_l)
+            db_r = _af_pct_to_db(reading.af_r)
+            self.af_l_meter.set_value(_af_db_to_bar_pct(db_l), _af_db_to_text(db_l))
+            self.af_r_meter.set_value(_af_db_to_bar_pct(db_r), _af_db_to_text(db_r))
 
         # MUTE takes priority (most urgent); otherwise the tuned frequency.
         if reading.muted:
@@ -578,13 +677,17 @@ class DeviceRow(QWidget):
         row 0:  IEM1  IEM2  IEM3  IEM4
         row 1:  Mic1  Mic2   --    --
 
-    `rows_used` (1 or 2) reflects how many grid rows are actually occupied,
-    and `layout_changed(rows)` fires on every rebuild so MainWindow can
-    grow/shrink the surrounding QGroupBox (and push the web view down/up)
-    to match.
+    Rows are no longer assumed uniform height: an IEM row can be shorter
+    than a Mic row when IEM's AF display is switched off in Preferences
+    (IEM_STRIP_HEIGHT_COMPACT instead of STRIP_HEIGHT). `layout_changed(px)`
+    fires on every rebuild carrying the *actual* pixel height groupDevices
+    needs (computed from the real per-row heights via
+    group_devices_height_for_rows()), so MainWindow can grow/shrink it (and
+    push the web view down/up) correctly regardless of that mix. `rows_used`
+    is still tracked too, informationally.
     """
 
-    layout_changed = Signal(int)   # rows_used, after a rebuild
+    layout_changed = Signal(int)   # group height in px, after a rebuild
 
     def __init__(self, settings, layout: QGridLayout, parent=None):
         super().__init__(parent)
@@ -597,17 +700,22 @@ class DeviceRow(QWidget):
         # every rebuild since IPs may have changed in Preferences.
         self._registry = DeviceRegistry()
         self.rows_used = 1
+        self.group_height = 0
         self.rebuild_from_settings()
 
     def rebuild_from_settings(self):
         self._teardown()
 
         devices_enabled = str(self.settings.get("DEVICES_ENABLED", default="true",
-                                                section="network")).lower() in ("1", "true", "yes",
-                                                                                "on")
+                                                  section="network")).lower() in ("1", "true", "yes", "on")
         poll_ms = self.settings.get("POLL_INTERVAL_MS", default=1000, cast=int, section="network")
         simulate = str(self.settings.get("SIMULATE_DEVICES", default="true",
-                                         section="network")).lower() in ("1", "true", "yes", "on")
+                                          section="network")).lower() in ("1", "true", "yes", "on")
+        # Section-level switch (not per-slot): Preferences -> IEM -> "Show AF
+        # level". Off means no L/R AF meters on any IEM strip, and no work
+        # done to populate af_l/af_r either -- see G4IemChannelClient.
+        iem_af_enabled = str(self.settings.get("IEM_AF_ENABLED", default="true",
+                                                section="iem")).lower() in ("1", "true", "yes", "on")
 
         # Build the ordered list of enabled channels first: IEM G4 (1-4),
         # then EW-DX EM2 mic channels (1-4). Fill order = this list order.
@@ -616,41 +724,50 @@ class DeviceRow(QWidget):
         if devices_enabled:
             for i in range(1, 5):
                 if str(self.settings.get(f"IEM{i}_ENABLED", default="false",
-                                         section="iem")).lower() in ("1", "true", "yes", "on"):
+                                          section="iem")).lower() in ("1", "true", "yes", "on"):
                     enabled_devices.append(("iem", i, f"IEM {i}"))
             for i in range(1, 5):
                 if str(self.settings.get(f"MIC{i}_ENABLED", default="false",
-                                         section="wireless_mics")).lower() in ("1", "true", "yes",
-                                                                               "on"):
+                                          section="wireless_mics")).lower() in ("1", "true", "yes", "on"):
                     enabled_devices.append(("mic", i, f"EM2 {i}"))
 
-        for index, (kind, slot, header_label) in enumerate(enabled_devices):
+        row_heights = {}   # row index -> tallest widget height placed in it
+
+        for index, (kind, slot, default_name) in enumerate(enabled_devices):
             row, col = divmod(index, GRID_COLUMNS)
             section = "iem" if kind == "iem" else "wireless_mics"
             prefix = "IEM" if kind == "iem" else "MIC"
             default_port = G4_PORT if kind == "iem" else SSC_PORT
-            name = self.settings.get(f"{prefix}{slot}_NAME",
-                                     default=header_label,
-                                     section=section)
-            ip = self.settings.get(f"{prefix}{slot}_IP",
-                                   default="", section=section)
-            port = self.settings.get(f"{prefix}{slot}_PORT",
-                                     default=default_port,
-                                     cast=int,
-                                     section=section)
-            channel = self.settings.get(f"{prefix}{slot}_CHANNEL",
-                                        default=1,
-                                        cast=int,
-                                        section=section)
-            self._add_device(kind, header_label, name, ip, port, channel, poll_ms, simulate, row,
-                             col)
+            # The configured Name from Preferences -- this is now what the
+            # widget's topmost label shows (see _add_device); the device's
+            # own reported name, fetched over the network, shows on the
+            # line below it instead. They're two different things and were
+            # previously conflated (the header showed a hardcoded slot
+            # label, and the name line silently fell back to this
+            # configured value whenever the device hadn't reported its own
+            # name yet -- see device_network.py's name-fallback removal).
+            configured_name = self.settings.get(f"{prefix}{slot}_NAME", default=default_name, section=section)
+            ip = self.settings.get(f"{prefix}{slot}_IP", default="", section=section)
+            port = self.settings.get(f"{prefix}{slot}_PORT", default=default_port, cast=int, section=section)
+            if kind == "iem":
+                # SR IEM G4 has no channel-select concept -- one physical
+                # unit is one channel -- so there's no per-slot setting for
+                # it (removed from Preferences -> IEM entirely). A fixed 1
+                # is passed through for interface symmetry with mic; it's
+                # never read on the IEM side.
+                channel = 1
+            else:
+                channel = self.settings.get(f"{prefix}{slot}_CHANNEL", default=1, cast=int, section=section)
+            widget_height = self._add_device(kind, configured_name, ip, port, channel, poll_ms,
+                                              simulate, iem_af_enabled, row, col)
+            row_heights[row] = max(row_heights.get(row, 0), widget_height)
 
         if enabled_devices:
             self.rows_used = min(GRID_MAX_ROWS, math.ceil(len(enabled_devices) / GRID_COLUMNS))
         else:
             # Collapsed state: no channel strips at all, just a short message
-            # -- and group_devices_height(0) shrinks the surrounding group
-            # (and grows the web view into the freed space) to match.
+            # -- group_devices_height_for_rows([]) shrinks the surrounding
+            # group (and grows the web view into the freed space) to match.
             self.rows_used = 0
             if not devices_enabled:
                 message = "Sennheiser IEM / Wireless Mics disabled\n(Preferences \u2192 General)"
@@ -662,22 +779,27 @@ class DeviceRow(QWidget):
             self.layout.addWidget(placeholder, 0, 0, 1, GRID_COLUMNS)
             self._widgets.append(placeholder)
 
-        self.layout_changed.emit(self.rows_used)
+        ordered_row_heights = [row_heights[r] for r in sorted(row_heights)]
+        self.group_height = group_devices_height_for_rows(ordered_row_heights)
+        self.layout_changed.emit(self.group_height)
 
-    def _add_device(self, kind, header_label, name, ip, port, channel, poll_ms, simulate, row, col):
+    def _add_device(self, kind, name, ip, port, channel, poll_ms, simulate, iem_af_enabled, row, col):
+        """Returns the widget's actual (fixed) height, for row-height tracking."""
         if kind == "mic":
-            widget = WirelessMicChannelWidget(header_label)
+            widget = WirelessMicChannelWidget(name)
         else:
-            widget = IemChannelWidget(header_label)
+            widget = IemChannelWidget(name, af_enabled=iem_af_enabled)
         self.layout.addWidget(widget, row, col)
         self._widgets.append(widget)
 
+        af_enabled_kwarg = {"af_enabled": iem_af_enabled} if kind == "iem" else {}
         client = make_client(kind, name, ip, port, channel, poll_ms, simulate,
-                             registry=self._registry, parent=self)
+                              registry=self._registry, parent=self, **af_enabled_kwarg)
         client.reading_changed.connect(widget.apply_reading)
         client.connection_changed.connect(widget.set_connected)
         client.start()
         self._clients.append(client)
+        return widget.height()
 
     def _teardown(self):
         for client in self._clients:
@@ -694,8 +816,8 @@ class DeviceRow(QWidget):
         # belt-and-suspenders: drop anything else left in the grid layout
         while self.layout.count():
             item = self.layout.takeAt(0)
-            if item.widget() is not None:                                           # type: ignore
-                item.widget().deleteLater()                                         # type: ignore
+            if item.widget() is not None:
+                item.widget().deleteLater()
         # Close every shared SSCEM2Device socket and start fresh -- IPs may
         # have changed in Preferences since the last build.
         self._registry.close_all()
