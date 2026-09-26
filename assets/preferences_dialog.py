@@ -26,21 +26,111 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QFrame,
     QSizePolicy, QSpacerItem, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 
+# Mirrors the styleSheet property of PreferencesDialogForm in
+# preferences_dialog.ui -- keep the two in sync.
+PREFERENCES_STYLESHEET = u"""\
+/* Explicit dark theme. The panel must not rely on the platform palette:
+   on macOS (dark mode) the default text is light, but on the Raspberry Pi
+   the platform palette is light, which painted black text on the dark
+   background of this panel. Every colour used here is stated outright so
+   the panel looks identical on both. */
+#PreferencesDialogForm { background-color: #2a2a2a; }
+#tabGeneral, #tabIem, #tabMics { background-color: #2a2a2a; }
+
+QTabWidget::pane { background-color: #2a2a2a; border: 1px solid #555555; }
+QTabBar::tab { background-color: #3a3a3a; color: #f0f0f0; border: 1px solid #555555; border-bottom: none; padding: 6px 10px; }
+QTabBar::tab:selected { background-color: #2a2a2a; color: #ffffff; }
+QTabBar::tab:disabled { color: #808080; }
+
+QGroupBox { background-color: #2a2a2a; color: #f0f0f0; border: 1px solid #555555; border-radius: 4px; margin-top: 10px; }
+QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; padding: 0 4px; color: #f0f0f0; }
+QGroupBox:disabled { color: #808080; border-color: #444444; }
+QGroupBox::title:disabled { color: #808080; }
+
+QLabel { background-color: transparent; color: #f0f0f0; }
+QLabel:disabled { color: #808080; }
+
+QCheckBox, QRadioButton { background-color: transparent; color: #f0f0f0; spacing: 8px; }
+QCheckBox:disabled, QRadioButton:disabled { color: #808080; }
+QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; background-color: #1e1e1e; border: 1px solid #8a8a8a; }
+QCheckBox::indicator { border-radius: 3px; }
+QRadioButton::indicator { border-radius: 10px; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked { background-color: #4a9eda; border: 1px solid #4a9eda; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { background-color: #2b2b2b; border: 1px solid #5a5a5a; }
+QCheckBox::indicator:checked:disabled, QRadioButton::indicator:checked:disabled { background-color: #4a6a85; border: 1px solid #4a6a85; }
+
+QLineEdit, QComboBox, QSpinBox { background-color: #1e1e1e; color: #f0f0f0; border: 1px solid #555555; border-radius: 3px; padding: 3px 4px; selection-background-color: #2f6fa8; selection-color: #ffffff; }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background-color: #262626; color: #777777; border-color: #3c3c3c; }
+QComboBox QAbstractItemView { background-color: #1e1e1e; color: #f0f0f0; border: 1px solid #555555; selection-background-color: #2f6fa8; selection-color: #ffffff; }
+
+QFrame#frameButtons { background-color: #2a2a2a; border: 1px solid #555555; border-radius: 4px; }
+QPushButton { background-color: #3a3a3a; color: #f0f0f0; border: 1px solid #666666; border-radius: 4px; padding: 6px 16px; }
+QPushButton:pressed { background-color: #505050; }
+QPushButton:disabled { color: #808080; border-color: #444444; }
+
+QToolTip { background-color: #1e1e1e; color: #f0f0f0; border: 1px solid #555555; }
+"""
+
+
+def _dark_palette() -> QPalette:
+    """The panel's colours, stated outright so native sub-controls
+    (check marks, spin/drop-down arrows, frames) do not fall back to the
+    platform palette -- which is light on the Raspberry Pi.
+    Mirrors the palette property in preferences_dialog.ui."""
+    palette = QPalette()
+    common = {
+        QPalette.ColorRole.WindowText: "#f0f0f0",
+        QPalette.ColorRole.Button: "#3a3a3a",
+        QPalette.ColorRole.Light: "#4a4a4a",
+        QPalette.ColorRole.Midlight: "#3f3f3f",
+        QPalette.ColorRole.Dark: "#1a1a1a",
+        QPalette.ColorRole.Mid: "#444444",
+        QPalette.ColorRole.Text: "#f0f0f0",
+        QPalette.ColorRole.BrightText: "#ffffff",
+        QPalette.ColorRole.ButtonText: "#f0f0f0",
+        QPalette.ColorRole.Base: "#1e1e1e",
+        QPalette.ColorRole.Window: "#2a2a2a",
+        QPalette.ColorRole.Shadow: "#101010",
+        QPalette.ColorRole.Highlight: "#2f6fa8",
+        QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.Link: "#4ea3e0",
+        QPalette.ColorRole.LinkVisited: "#a06fd0",
+        QPalette.ColorRole.AlternateBase: "#262626",
+        QPalette.ColorRole.ToolTipBase: "#1e1e1e",
+        QPalette.ColorRole.ToolTipText: "#f0f0f0",
+        QPalette.ColorRole.PlaceholderText: "#8a8a8a",
+    }
+    disabled = {
+        QPalette.ColorRole.WindowText: "#808080",
+        QPalette.ColorRole.Text: "#777777",
+        QPalette.ColorRole.ButtonText: "#808080",
+        QPalette.ColorRole.Base: "#262626",
+        QPalette.ColorRole.Button: "#333333",
+        QPalette.ColorRole.Highlight: "#3f3f3f",
+        QPalette.ColorRole.HighlightedText: "#b0b0b0",
+        QPalette.ColorRole.PlaceholderText: "#6a6a6a",
+        QPalette.ColorRole.BrightText: "#909090",
+    }
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive,
+                  QPalette.ColorGroup.Disabled):
+        for role, color in common.items():
+            if group is QPalette.ColorGroup.Disabled and role in disabled:
+                color = disabled[role]
+            brush = QBrush(QColor(color))
+            brush.setStyle(Qt.BrushStyle.SolidPattern)
+            palette.setBrush(group, role, brush)
+    return palette
+
+
 class Ui_PreferencesDialogForm(object):
     def setupUi(self, PreferencesDialogForm):
         if not PreferencesDialogForm.objectName():
             PreferencesDialogForm.setObjectName(u"PreferencesDialogForm")
         PreferencesDialogForm.resize(300, 640)
 
-        palette = QPalette()
-        brush = QBrush(QColor(42, 42, 42, 255))
-        brush.setStyle(Qt.BrushStyle.SolidPattern)
-        palette.setBrush(QPalette.ColorGroup.Active, QPalette.ColorRole.Window, brush)
-        palette.setBrush(QPalette.ColorGroup.Inactive, QPalette.ColorRole.Window, brush)
-        palette.setBrush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Base, brush)
-        palette.setBrush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Window, brush)
-        PreferencesDialogForm.setPalette(palette)
+        PreferencesDialogForm.setPalette(_dark_palette())
         PreferencesDialogForm.setAutoFillBackground(True)
+        PreferencesDialogForm.setStyleSheet(PREFERENCES_STYLESHEET)
 
         self.verticalLayout = QVBoxLayout(PreferencesDialogForm)
         self.verticalLayout.setSpacing(8)
