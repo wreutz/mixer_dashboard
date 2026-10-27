@@ -21,10 +21,10 @@ and the poll interval), **IEM**, and **Wireless Mics**.
 | `assets/mainwindow.py` | Hand-authored compiled equivalent of the above (see regeneration note below). |
 | `assets/preferences_dialog.ui` | Wrapped the existing timecode/MIDI/OSC groups in a `QTabWidget` **General** tab (plus the master enable switch, simulate toggle, poll interval), added an **IEM** tab (a section-level "Show AF level" switch, plus 4 slots exposing Enabled / Name / IP / Port -- no Channel field, an SR IEM G4 has no channel-select concept) and **Wireless Mics** tab (4 slots, Channel included -- an EW-DX EM2 genuinely has two, rx1/rx2). OK/Cancel stay outside the tabs. |
 | `assets/preferences_dialog.py` | Hand-authored compiled equivalent (uses small loops to build the 4+4 repeated slot groupboxes, but produces identical `objectName`s to what `pyside6-uic` would emit from the `.ui`). |
-| `preferences.py` | Loads/saves all General + IEM + Wireless Mics fields to `settings.ini`, emits `settingsApplied` on OK. Greys out Simulate/poll-interval/the IEM & Mic tabs when the master switch is off. |
+| `preferences.py` | Loads/saves all General + IEM + Wireless Mics fields to `settings.ini`, emits `settingsApplied` on OK. Greys out the IEM / Mic tab when its master switch is off, and Simulate/poll-interval when both are off. |
 | `device_network.py` | Talks to real hardware over two confirmed Sennheiser protocols -- see "Protocols" below. `SimulatedDeviceClient` still covers any slot with no IP set, or with Simulate on. `DeviceReading.name` is now purely the device's own reported name (no more silent fallback to the configured name). |
 | `device_widgets.py` | `ChannelStripWidget` (+ `IemChannelWidget`, `WirelessMicChannelWidget`) -- segmented RF/LQI/AF bargraphs (AF now dense/near-continuous, WSM-style), a diversity indicator, and a battery gauge -- and `DeviceRow`, which builds the whole grid from `settings.ini`, owns the network clients, and tracks the *actual* per-row heights (rows aren't uniform anymore now that IEM's AF section can be switched off) so the surrounding group can resize correctly. |
-| `main.py` | Wires `DeviceRow` into the device grid, extends `SettingsManager` defaults with `[network]` (now including the master `DEVICES_ENABLED` switch), `[iem]` (now including the section-level `IEM_AF_ENABLED` switch, no more per-slot channel), `[wireless_mics]` sections, and reloads/rebuilds + resizes on Preferences apply. |
+| `main.py` | Wires `DeviceRow` into the device grid, extends `SettingsManager` defaults with `[network]` (now including the separate `IEM_ENABLED` / `WIRELESS_MICS_ENABLED` master switches, migrated from the former combined `DEVICES_ENABLED`), `[companion]` per-layout URLs, `[iem]` (now including the section-level `IEM_AF_ENABLED` switch, no more per-slot channel), `[wireless_mics]` sections, and reloads/rebuilds + resizes on Preferences apply. |
 
 ### Regenerating the `.ui` → `.py` files for real
 
@@ -355,7 +355,8 @@ Once your IPs are filled in under Preferences → IEM / Wireless Mics, flip
 
 ```ini
 [network]
-DEVICES_ENABLED = true    ; master switch -- see Preferences -> General
+IEM_ENABLED = true             ; master switch -- see Preferences -> General
+WIRELESS_MICS_ENABLED = true   ; master switch -- see Preferences -> General
 SIMULATE_DEVICES = true
 POLL_INTERVAL_MS = 1000
 
@@ -379,10 +380,31 @@ MIC1_CHANNEL = 1    ; rx1 on the EM2 at MIC1_IP
 ; MIC3/MIC4 default to disabled, CHANNEL 1/2 (second EM2 unit's IP)
 ```
 
-Setting `DEVICES_ENABLED = false` (or unchecking "Enable Sennheiser IEM /
-Wireless Mics" in Preferences → General) skips starting any client at all,
-regardless of individual slot settings, and collapses the group to its
-66px minimum.
+Setting `IEM_ENABLED = false` / `WIRELESS_MICS_ENABLED = false` (or
+unchecking "Enable Sennheiser IEM" / "Enable Sennheiser Wireless Mics" in
+Preferences → General) skips starting any client of that kind, regardless
+of individual slot settings. With both off the group collapses to its 66px
+minimum. (A legacy `DEVICES_ENABLED` key is migrated to both on load.)
+
+### Per-layout companion URLs
+
+The web view's height depends on the rows the device grid actually occupies
+(4 strips per row, IEMs first, then mics), so `[companion]` takes one URL
+per resulting layout (`settings.ini` only, no Preferences UI). Any left
+empty falls back to `COMPANION_URL`. A "compact" row holds only IEM strips
+without AF; any row with an IEM-with-AF or mic strip is full height.
+
+```ini
+[companion]
+COMPANION_URL =                   ; fallback for any empty key below
+COMPANION_URL_NO_DEVICES =        ; nothing shown
+COMPANION_URL_COMPACT_ROW =       ; one row, IEM without AF only
+COMPANION_URL_FULL_ROW =          ; one full-height row (IEM with AF / mics, max 4 strips)
+COMPANION_URL_COMPACT_FULL_ROW =  ; 4 IEM without AF + a second row with mics
+COMPANION_URL_TWO_FULL_ROWS =     ; two full-height rows (e.g. 3 IEM w/o AF + 2 mics)
+```
+
+The page only reloads when the layout maps to a different URL.
 
 Point `MIC1_IP` and `MIC2_IP` at the *same* EM2 unit's address with
 `CHANNEL` 1 and 2 respectively — `DeviceRegistry` recognizes the shared IP

@@ -5,7 +5,8 @@ Embedded preferences panel (shown/hidden over the main window rather than a
 modal dialog, for kiosk/touch operation). Wraps Ui_PreferencesDialogForm and
 handles:
   - General tab: timecode source (MIDI/OSC), MIDI port, OSC host/port/address/
-    fps fallback, device simulation toggle + poll interval.
+    fps fallback, IEM / wireless-mic master switches, device simulation
+    toggle + poll interval.
   - IEM tab: a section-level "Show AF level" switch, plus 4 IEM G4 slots
     (enabled, name, ip, port -- no channel field, an SR IEM G4 has no
     channel-select concept).
@@ -42,7 +43,8 @@ class PreferencesPanel(QWidget):
         self.ui.btn_ok.clicked.connect(self._on_ok)
         self.ui.btn_cancel.clicked.connect(self._on_cancel)
         self.ui.rb_midi.toggled.connect(self._update_source_enabled_state)
-        self.ui.cb_devices_enabled.toggled.connect(self._update_devices_enabled_state)
+        self.ui.cb_iem_enabled.toggled.connect(self._update_devices_enabled_state)
+        self.ui.cb_mics_enabled.toggled.connect(self._update_devices_enabled_state)
         self.ui.cb_simulate_devices.toggled.connect(self._update_simulate_enabled_state)
 
     # ------------------------------------------------------------------
@@ -56,11 +58,12 @@ class PreferencesPanel(QWidget):
         self.ui.groupOSC.setEnabled(not is_midi)
 
     def _update_devices_enabled_state(self):
-        enabled = self.ui.cb_devices_enabled.isChecked()
-        self.ui.cb_simulate_devices.setEnabled(enabled)
-        self.ui.spin_poll_interval.setEnabled(enabled)
-        self.ui.tabWidget.setTabEnabled(self.ui.tabWidget.indexOf(self.ui.tabIem), enabled)
-        self.ui.tabWidget.setTabEnabled(self.ui.tabWidget.indexOf(self.ui.tabMics), enabled)
+        iem_enabled = self.ui.cb_iem_enabled.isChecked()
+        mics_enabled = self.ui.cb_mics_enabled.isChecked()
+        self.ui.cb_simulate_devices.setEnabled(iem_enabled or mics_enabled)
+        self.ui.spin_poll_interval.setEnabled(iem_enabled or mics_enabled)
+        self.ui.tabWidget.setTabEnabled(self.ui.tabWidget.indexOf(self.ui.tabIem), iem_enabled)
+        self.ui.tabWidget.setTabEnabled(self.ui.tabWidget.indexOf(self.ui.tabMics), mics_enabled)
 
     def _update_simulate_enabled_state(self):
         simulate = self.ui.cb_simulate_devices.isChecked()
@@ -96,8 +99,10 @@ class PreferencesPanel(QWidget):
         self.ui.le_osc_addr.setText(str(s.get("OSC_ADDRESS", default="/timecode")))
         self.ui.le_fps_fallback.setText(str(s.get("OSC_FRAMERATE_FALLBACK", default=30)))
 
-        devices_enabled = _to_bool(s.get("DEVICES_ENABLED", default="true", section="network"))
-        self.ui.cb_devices_enabled.setChecked(devices_enabled)
+        self.ui.cb_iem_enabled.setChecked(
+            _to_bool(s.get("IEM_ENABLED", default="true", section="network")))
+        self.ui.cb_mics_enabled.setChecked(
+            _to_bool(s.get("WIRELESS_MICS_ENABLED", default="true", section="network")))
         simulate = _to_bool(s.get("SIMULATE_DEVICES", default="true", section="network"))
         self.ui.cb_simulate_devices.setChecked(simulate)
         self.ui.spin_poll_interval.setValue(
@@ -144,7 +149,8 @@ class PreferencesPanel(QWidget):
         s.set("OSC_ADDRESS", self.ui.le_osc_addr.text())
         s.set("OSC_FRAMERATE_FALLBACK", self.ui.le_fps_fallback.text() or "30")
 
-        s.set("DEVICES_ENABLED", self.ui.cb_devices_enabled.isChecked(), section="network")
+        s.set("IEM_ENABLED", self.ui.cb_iem_enabled.isChecked(), section="network")
+        s.set("WIRELESS_MICS_ENABLED", self.ui.cb_mics_enabled.isChecked(), section="network")
         s.set("SIMULATE_DEVICES", self.ui.cb_simulate_devices.isChecked(), section="network")
         s.set("POLL_INTERVAL_MS", self.ui.spin_poll_interval.value(), section="network")
         s.set("IEM_AF_ENABLED", self.ui.cb_iem_af_enabled.isChecked(), section="iem")

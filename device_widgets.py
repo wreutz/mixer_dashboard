@@ -136,7 +136,8 @@ def group_devices_height_for_rows(row_heights) -> int:
     grow/shrink groupDevices (and push the web view down/up) correctly.
 
     An empty list is the collapsed state -- no channels enabled, or the
-    whole feature switched off via DEVICES_ENABLED -- which needs only
+    IEM / mic features switched off via IEM_ENABLED / WIRELESS_MICS_ENABLED
+    -- which needs only
     enough room for a short message, not a full row of channel strips.
     """
     if not row_heights:
@@ -685,6 +686,11 @@ class DeviceRow(QWidget):
     group_devices_height_for_rows()), so MainWindow can grow/shrink it (and
     push the web view down/up) correctly regardless of that mix. `rows_used`
     is still tracked too, informationally.
+
+    After each rebuild, `row_heights` holds the actual height of each
+    occupied grid row (tallest widget in it; empty list = collapsed) -- used
+    by MainWindow to pick the companion URL matching the space left for the
+    web view.
     """
 
     layout_changed = Signal(int)   # group height in px, after a rebuild
@@ -701,13 +707,19 @@ class DeviceRow(QWidget):
         self._registry = DeviceRegistry()
         self.rows_used = 1
         self.group_height = 0
+        self.row_heights = []
         self.rebuild_from_settings()
 
     def rebuild_from_settings(self):
         self._teardown()
 
-        devices_enabled = str(self.settings.get("DEVICES_ENABLED", default="true",
-                                                  section="network")).lower() in ("1", "true", "yes", "on")
+        # Section-level master switches (Preferences -> General) -- when off,
+        # no clients of that kind are started regardless of individual slot
+        # enables.
+        iem_enabled = str(self.settings.get("IEM_ENABLED", default="true",
+                                              section="network")).lower() in ("1", "true", "yes", "on")
+        mics_enabled = str(self.settings.get("WIRELESS_MICS_ENABLED", default="true",
+                                               section="network")).lower() in ("1", "true", "yes", "on")
         poll_ms = self.settings.get("POLL_INTERVAL_MS", default=1000, cast=int, section="network")
         simulate = str(self.settings.get("SIMULATE_DEVICES", default="true",
                                           section="network")).lower() in ("1", "true", "yes", "on")
@@ -719,13 +731,14 @@ class DeviceRow(QWidget):
 
         # Build the ordered list of enabled channels first: IEM G4 (1-4),
         # then EW-DX EM2 mic channels (1-4). Fill order = this list order.
-        # Skipped entirely if the whole feature is switched off.
+        # Each kind is skipped entirely if its section switch is off.
         enabled_devices = []
-        if devices_enabled:
+        if iem_enabled:
             for i in range(1, 5):
                 if str(self.settings.get(f"IEM{i}_ENABLED", default="false",
                                           section="iem")).lower() in ("1", "true", "yes", "on"):
                     enabled_devices.append(("iem", i, f"IEM {i}"))
+        if mics_enabled:
             for i in range(1, 5):
                 if str(self.settings.get(f"MIC{i}_ENABLED", default="false",
                                           section="wireless_mics")).lower() in ("1", "true", "yes", "on"):
@@ -769,7 +782,7 @@ class DeviceRow(QWidget):
             # -- group_devices_height_for_rows([]) shrinks the surrounding
             # group (and grows the web view into the freed space) to match.
             self.rows_used = 0
-            if not devices_enabled:
+            if not iem_enabled and not mics_enabled:
                 message = "Sennheiser IEM / Wireless Mics disabled\n(Preferences \u2192 General)"
             else:
                 message = "No IEM / mic channels enabled\n(Preferences \u2192 IEM / Wireless Mics)"
@@ -779,8 +792,8 @@ class DeviceRow(QWidget):
             self.layout.addWidget(placeholder, 0, 0, 1, GRID_COLUMNS)
             self._widgets.append(placeholder)
 
-        ordered_row_heights = [row_heights[r] for r in sorted(row_heights)]
-        self.group_height = group_devices_height_for_rows(ordered_row_heights)
+        self.row_heights = [row_heights[r] for r in sorted(row_heights)]
+        self.group_height = group_devices_height_for_rows(self.row_heights)
         self.layout_changed.emit(self.group_height)
 
     def _add_device(self, kind, name, ip, port, channel, poll_ms, simulate, iem_af_enabled, row, col):

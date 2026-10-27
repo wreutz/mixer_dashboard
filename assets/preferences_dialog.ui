@@ -804,27 +804,34 @@
            <number>24</number>
           </property>
           <item row="0" column="0">
-           <widget class="QCheckBox" name="cb_devices_enabled">
+           <widget class="QCheckBox" name="cb_iem_enabled">
             <property name="text">
-             <string>Enable Sennheiser IEM / Wireless Mics</string>
+             <string>Enable Sennheiser IEM</string>
             </property>
            </widget>
           </item>
           <item row="1" column="0">
+           <widget class="QCheckBox" name="cb_mics_enabled">
+            <property name="text">
+             <string>Enable Sennheiser Wireless Mics</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
            <widget class="QCheckBox" name="cb_simulate_devices">
             <property name="text">
              <string>Simulate (no hardware)</string>
             </property>
            </widget>
           </item>
-          <item row="2" column="0">
+          <item row="3" column="0">
            <widget class="QLabel" name="label_poll_interval">
             <property name="text">
              <string>Poll interval (ms)</string>
             </property>
            </widget>
           </item>
-          <item row="2" column="1">
+          <item row="3" column="1">
            <widget class="QSpinBox" name="spin_poll_interval">
             <property name="minimum">
              <number>200</number>

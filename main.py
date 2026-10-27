@@ -35,7 +35,7 @@ from pythonosc import osc_server
 
 from assets.mainwindow import Ui_MainWindow
 from preferences import PreferencesPanel
-from device_widgets import DeviceRow
+from device_widgets import DeviceRow, IEM_STRIP_HEIGHT_COMPACT
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -78,12 +78,25 @@ class SettingsManager:
             },
             "companion": {
                 "COMPANION_URL": "http://localhost:8080",
+                # Optional per-layout URLs (settings.ini only, no Preferences
+                # UI) -- the web view's height depends on the rows the device
+                # grid actually occupies, so each layout can get its own
+                # companion page. Empty = fall back to COMPANION_URL. See
+                # MainWindow._companion_url_for_device_layout().
+                "COMPANION_URL_NO_DEVICES": "",        # nothing shown
+                "COMPANION_URL_COMPACT_ROW": "",       # 1 row, IEM without AF only
+                "COMPANION_URL_FULL_ROW": "",          # 1 full-height row (IEM with AF / mics, max 4)
+                "COMPANION_URL_COMPACT_FULL_ROW": "",  # 4 IEM without AF + a row with mics
+                "COMPANION_URL_TWO_FULL_ROWS": "",     # 2 full-height rows (e.g. 3 IEM w/o AF + 2 mics)
             },
             "network": {
-                # Master switch for the whole IEM/Mic feature -- when false, no
-                # clients are started regardless of individual slot enables, and
-                # the group collapses to a one-line "disabled" message.
-                "DEVICES_ENABLED": "true",
+                # Section-level master switches for IEM / wireless mics -- when
+                # false, no clients of that kind are started regardless of
+                # individual slot enables; with both false the group collapses
+                # to a one-line "disabled" message. (Replaces the former
+                # combined DEVICES_ENABLED, migrated in _ensure_loaded().)
+                "IEM_ENABLED": "true",
+                "WIRELESS_MICS_ENABLED": "true",
                 # No real Sennheiser hardware is assumed present by default; flip this
                 # off once IPs below point at real EW-DX EM2 / IEM G4 units. See
                 # device_network.py for protocol notes/caveats.
@@ -146,6 +159,12 @@ class SettingsManager:
                     if canonical not in sec:
                         sec[canonical] = sec[key]
                     del sec[key]
+            if section == "network" and "DEVICES_ENABLED" in sec:
+                # legacy combined switch -> separate IEM / wireless-mic switches
+                for k in ("IEM_ENABLED", "WIRELESS_MICS_ENABLED"):
+                    if k not in sec:
+                        sec[k] = sec["DEVICES_ENABLED"]
+                del sec["DEVICES_ENABLED"]
             for k, v in section_defaults.items():
                 if k not in sec:
                     sec[k] = v
@@ -576,17 +595,13 @@ class MainWindow(QMainWindow):
         # Fills IEM 1-4 first, then Mic 1-4, into a 4-col x up-to-2-row grid.
         self.device_row = DeviceRow(self.settings, self._ui.deviceRowLayout, self._ui.deviceRowContents)
         self.device_row.layout_changed.connect(self._apply_device_row_geometry)
-        # Apply sizing for the initial build (rebuild_from_settings() already
-        # ran once inside DeviceRow.__init__, before the signal above was
-        # connected, so size explicitly for that first pass here).
+        self.device_row.layout_changed.connect(self._apply_companion_url)
+        # Apply sizing + web view URL for the initial build
+        # (rebuild_from_settings() already ran once inside DeviceRow.__init__,
+        # before the signals above were connected, so apply explicitly for
+        # that first pass here).
         self._apply_device_row_geometry(self.device_row.group_height)
-
-        # WebView
-        self._ui.webView.setUrl(QUrl(self.settings.get(                             # type: ignore
-            "COMPANION_URL",
-            default="http://localhost:8080",
-            section="companion",
-        )))
+        self._apply_companion_url()
 
         # Embedded preferences panel for kiosk/touch operation
         self.preferences_panel = PreferencesPanel(self.settings, self._ui.centralwidget)
@@ -657,7 +672,44 @@ class MainWindow(QMainWindow):
         self.device_row.rebuild_from_settings()
         # (device_row.rebuild_from_settings() emits layout_changed, which
         # _apply_device_row_geometry() below is connected to, so the
-        # groupDevices/webView resize happens automatically.)
+        # groupDevices/webView resize and companion URL switch happen
+        # automatically.)
+
+    def _companion_url_for_device_layout(self) -> str:
+        """
+        Pick the companion URL matching the rows the device grid actually
+        occupies (compact = a row of IEM strips without AF only, full = any
+        row holding a full-height strip), since that decides how much height
+        the web view gets. Falls back to COMPANION_URL when the matching key
+        is empty.
+        """
+        compact = [h <= IEM_STRIP_HEIGHT_COMPACT for h in self.device_row.row_heights]
+        if not compact:
+            key = "COMPANION_URL_NO_DEVICES"
+        elif compact == [True]:
+            key = "COMPANION_URL_COMPACT_ROW"
+        elif len(compact) == 1:
+            key = "COMPANION_URL_FULL_ROW"
+        elif compact[0]:
+            # IEMs fill the grid first, so only the first row can be compact
+            key = "COMPANION_URL_COMPACT_FULL_ROW"
+        else:
+            key = "COMPANION_URL_TWO_FULL_ROWS"
+        url = str(self.settings.get(key, default="", section="companion") or "").strip()
+        if not url:
+            url = self.settings.get("COMPANION_URL", default="http://localhost:8080", section="companion")
+        return url
+
+    @Slot()
+    def _apply_companion_url(self):
+        url = self._companion_url_for_device_layout()
+        # Only (re)load when the layout actually maps to a different URL, so
+        # an unrelated Preferences change doesn't reload the companion page.
+        # (Compared against the last *requested* URL, not webView.url(),
+        # which may differ after a redirect.)
+        if url != getattr(self, "_companion_url", None):
+            self._companion_url = url
+            self._ui.webView.setUrl(QUrl(url))                                      # type: ignore
 
     @Slot(int)
     def _apply_device_row_geometry(self, group_h: int):
