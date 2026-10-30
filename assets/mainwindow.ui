@@ -233,6 +233,19 @@
       <string>Preferences</string>
      </property>
     </widget>
+    <widget class="QPushButton" name="btnExit">
+     <property name="geometry">
+      <rect>
+       <x>200</x>
+       <y>125</y>
+       <width>100</width>
+       <height>20</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Exit</string>
+     </property>
+    </widget>
    </widget>
    <widget class="QGroupBox" name="groupDevices">
     <!-- Height below (502) matches device_widgets.group_devices_height_for_rows([234,234]):

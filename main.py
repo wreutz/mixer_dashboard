@@ -615,6 +615,12 @@ class MainWindow(QMainWindow):
             self._ui.btnPreferences.clicked.connect(self.open_preferences)
         except Exception:
             pass  # in case UI not updated
+        
+        # Exit button
+        try:
+            self._ui.btnExit.clicked.connect(self.exit_app)
+        except Exception:
+            pass    # in case UI not updated
 
         # fullscreen option parsed from command line
         if has_fullscreen_option:
@@ -664,6 +670,9 @@ class MainWindow(QMainWindow):
         self.preferences_panel.raise_()
         self.preferences_panel.show()
         self.preferences_panel.activateWindow()
+        
+    def exit_app(self):
+        sys.exit()
 
     @Slot()
     def on_settings_applied(self):
